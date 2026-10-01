@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Granite: a database you can unplug</title>
+<meta name="description" content="A SQL database written from scratch in C++, running in your browser. Pull the plug mid-transaction and watch it recover, then see it survive 10,000 simulated power cuts.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect x=%2215%22 y=%2215%22 width=%2270%22 height=%2270%22 rx=%2212%22 fill=%22%231C1F23%22/><rect x=%2240%22 y=%2240%22 width=%2220%22 height=%2220%22 fill=%22%23F25C05%22/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #F1F2F4; --panel: #FFFFFF; --sunk: #F6F7F8; --line: #D9DCE1; --ink: #1C1F23; --muted: #646B76;
+  --orange: #F25C05; --orange-soft: #FFF0E6; --green: #1F8A5B; --green-soft: #E7F5EE; --amber: #B7791F; --amber-soft: #FDF5E6;
+  --sans: "Archivo", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color-scheme: light;
+}
+:root { box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+*, *::before, *::after { box-sizing: inherit; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 400 15px/1.55 var(--sans); }
+a { color: var(--ink); text-underline-offset: 3px; }
+button, input, select, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; border-radius: 4px; }
+[hidden] { display: none !important; }
+
+.top { display: flex; align-items: center; gap: 24px; padding: 12px 24px; background: var(--ink); color: #fff; position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; }
+.brand { font: 800 21px var(--sans); letter-spacing: -0.02em; display: flex; align-items: center; gap: 10px; }
+.brand i { width: 14px; height: 14px; background: var(--orange); display: inline-block; border-radius: 2px; }
+.tabs { display: flex; gap: 4px; }
+.tabs button { background: none; border: 0; color: #A7AFBA; padding: 7px 13px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+.tabs button:hover { color: #fff; }
+.tabs button[aria-selected="true"] { color: #fff; background: #2C3138; }
+.tagline { color: #A7AFBA; font-size: 13px; }
+.gh { margin-left: auto; color: #A7AFBA; text-decoration: none; font-size: 14px; font-weight: 500; }
+.gh:hover { color: #fff; }
+
+.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 8px 13px; cursor: pointer; font-weight: 600; font-size: 14px; }
+.btn:hover:not(:disabled) { border-color: var(--muted); }
+.btn:disabled { opacity: 0.4; cursor: default; }
+.btn.dark { background: var(--ink); color: #fff; border-color: var(--ink); }
+.btn.plug { background: var(--orange); border-color: var(--orange); color: #fff; font-size: 16px; padding: 13px 18px; width: 100%; display: flex; align-items: center; justify-content: center; gap: 10px; box-shadow: 0 2px 0 #B84300; }
+.btn.plug:hover:not(:disabled) { filter: brightness(1.05); }
+.btn.plug:active:not(:disabled) { transform: translateY(1px); box-shadow: 0 1px 0 #B84300; }
+.btn.plug-alt { width: 100%; border-color: color-mix(in srgb, var(--orange) 50%, var(--line)); color: #B84300; }
+.chip { background: var(--sunk); border: 1px solid var(--line); border-radius: 99px; padding: 5px 11px; font-size: 13px; cursor: pointer; font-weight: 500; }
+.chip:hover { border-color: var(--muted); background: #fff; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+.card h2 { font-size: 13px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px; }
+.hint { color: var(--muted); font-size: 13.5px; margin: 0 0 10px; }
+
+/* playground */
+#play { max-width: 1480px; margin: 0 auto; padding: 20px 24px 40px; display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+.status { grid-column: 1 / -1; background: var(--panel); border: 1px solid var(--line); border-left: 5px solid var(--green); border-radius: 12px; padding: 14px 20px; }
+.status.warn { border-left-color: var(--amber); background: linear-gradient(90deg, var(--amber-soft), var(--panel) 40%); }
+.status.out { border-left-color: var(--orange); background: linear-gradient(90deg, var(--orange-soft), var(--panel) 50%); }
+.status h1 { font-size: 21px; margin: 0 0 3px; letter-spacing: -0.01em; line-height: 1.3; }
+.status p { margin: 0; color: #3E444D; max-width: 110ch; }
+.left, .right { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+.editor { position: relative; }
+#sql { width: 100%; min-height: 120px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; background: var(--sunk); padding: 12px 14px; font: 14px/1.6 var(--mono); }
+#sql:focus { background: #fff; }
+.runbar { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.runbar .kbd { color: var(--muted); font-size: 12.5px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.chips span { color: var(--muted); font-size: 13px; align-self: center; margin-right: 2px; }
+
+.results { overflow-x: auto; }
+.res + .res { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--line); }
+.res .msg { font-weight: 600; margin: 0; }
+.res .err { color: #B42318; font-family: var(--mono); font-size: 13.5px; white-space: pre-wrap; margin: 0; }
+.res table { border-collapse: collapse; font: 13px var(--mono); width: 100%; }
+.res th { text-align: left; font-weight: 700; border-bottom: 2px solid var(--ink); padding: 5px 14px 5px 0; white-space: nowrap; }
+.res td { border-bottom: 1px solid #ECEEF1; padding: 5px 14px 5px 0; white-space: nowrap; }
+.res td.n { text-align: right; }
+.res td.null { color: #A0A6AF; }
+.plan { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+.plan code { font-family: var(--mono); background: var(--sunk); border: 1px solid var(--line); padding: 1px 6px; border-radius: 4px; color: var(--ink); }
+.plan b { color: var(--ink); }
+.more { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+
+.plugcard { border: 2px solid var(--ink); }
+.plugcard .row { display: grid; grid-template-columns: 1.4fr 1fr; gap: 10px; margin-top: 4px; }
+.plugcard p { margin: 0 0 12px; color: #3E444D; }
+.report { margin-top: 14px; border-radius: 10px; background: var(--orange-soft); border: 1px solid color-mix(in srgb, var(--orange) 35%, transparent); padding: 14px 16px; }
+.report h3 { margin: 0 0 6px; font-size: 16px; }
+.report ol { margin: 0; padding-left: 20px; }
+.report li { margin: 3px 0; }
+.report .ok { color: var(--green); font-weight: 700; }
+
+.storage { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.meter { background: var(--sunk); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.meter b { display: block; font: 700 19px var(--mono); }
+.meter span { font-size: 12.5px; color: var(--muted); display: block; line-height: 1.35; }
+.storage-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.storage-actions .hint { margin: 0; }
+
+.treehead { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.treehead h2 { margin: 0; }
+.treehead select { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: #fff; }
+#treeWrap { overflow-x: auto; }
+#tree { display: block; }
+#tree text { font-family: var(--mono); }
+.treelegend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.treelegend i { display: inline-block; width: 12px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+/* torture */
+#torture { max-width: 1180px; margin: 0 auto; padding: 40px 24px 64px; }
+#torture h1 { font-size: 42px; line-height: 1.08; letter-spacing: -0.03em; margin: 0 0 16px; max-width: 18ch; }
+.intro { max-width: 760px; margin-bottom: 26px; }
+.intro p { color: #3E444D; font-size: 16.5px; line-height: 1.65; margin: 0 0 12px; }
+.tgrid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+.bugs { border: 0; padding: 0; margin: 0 0 16px; }
+.bugs legend { font-size: 13px; color: var(--muted); margin-bottom: 8px; padding: 0; }
+.bugs label { display: flex; gap: 10px; padding: 9px 10px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+.bugs label:hover { background: var(--sunk); }
+.bugs label:has(input:checked) { background: var(--sunk); border-color: var(--line); }
+.bugs input { accent-color: var(--orange); margin-top: 4px; }
+.bugs small { color: var(--muted); }
+.form { display: flex; gap: 16px; margin-bottom: 16px; }
+.form label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.form input { border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; width: 140px; font-family: var(--mono); }
+.progress { height: 6px; background: var(--sunk); border-radius: 99px; overflow: hidden; margin: 16px 0 12px; border: 1px solid var(--line); }
+#bar { height: 100%; width: 0; background: var(--green); transition: width 0.1s; }
+#bar.bad { background: var(--orange); }
+.big-ok { color: var(--green); font-size: 19px; font-weight: 700; margin: 0 0 8px; }
+.big-bad { color: #B42318; font-size: 19px; font-weight: 700; margin: 0 0 8px; }
+.tstats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
+.failure { background: var(--orange-soft); border: 1px solid color-mix(in srgb, var(--orange) 40%, transparent); border-radius: 8px; padding: 12px; font-size: 14px; }
+.promises dt { font-weight: 700; margin-top: 12px; }
+.promises dt::before { content: "✓ "; color: var(--green); }
+.promises dd { margin: 3px 0 0 18px; color: #3E444D; font-size: 14px; }
+
+@media (max-width: 1080px) {
+  #play, .tgrid { grid-template-columns: minmax(0, 1fr); }
+  .tagline { display: none; }
+}
+@media (max-width: 620px) {
+  #play { padding: 12px; }
+  .top { gap: 12px; padding: 10px 12px; }
+  .gh { display: none; }
+  .storage { grid-template-columns: minmax(0, 1fr); }
+  .plugcard .row { grid-template-columns: minmax(0, 1fr); }
+  #torture h1 { font-size: 30px; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><i></i>granite</div>
+  <nav class="tabs" role="tablist">
+    <button role="tab" aria-selected="true" data-tab="play">Playground</button>
+    <button role="tab" aria-selected="false" data-tab="torture">Torture test</button>
+  </nav>
+  <span class="tagline">A SQL database written from scratch in C++, running in your browser</span>
+  <a class="gh" href="https://github.com/CodingWithTaj/granite">Source on GitHub</a>
+</header>
+
+<main id="play">
+  <section class="status" id="status" aria-live="polite"><h1>Loading the database…</h1><p></p></section>
+
+  <div class="left">
+    <section class="card">
+      <h2>Ask it something</h2>
+      <div class="editor"><textarea id="sql" spellcheck="false" aria-label="SQL"></textarea></div>
+      <div class="runbar">
+        <button class="btn dark" id="run">Run</button>
+        <span class="kbd">Ctrl+Enter</span>
+      </div>
+      <div class="chips" id="chips"><span>Try:</span></div>
+    </section>
+    <section class="card results" id="results" aria-live="polite"><p class="hint">Results appear here.</p></section>
+  </div>
+
+  <div class="right">
+    <section class="card plugcard">
+      <h2>The power switch</h2>
+      <p id="plugText">Cut the power at any moment. When the database restarts, every committed transaction will be there, and anything unfinished will be gone completely, never half done.</p>
+      <div class="row">
+        <button class="btn plug" id="plug"><span aria-hidden="true">⏻</span> Pull the plug</button>
+        <button class="btn plug-alt" id="plugCommit" title="Start a transaction first (BEGIN), then use this">…mid-commit</button>
+      </div>
+      <div id="report"></div>
+    </section>
+
+    <section class="card">
+      <div class="treehead"><h2>The B+ tree</h2><select id="tableSel" aria-label="Table"></select></div>
+      <p class="hint" id="treeHint"></p>
+      <div id="treeWrap"><svg id="tree" role="img" aria-label="B+ tree pages"></svg></div>
+      <div class="treelegend"><span><i style="background:#1C1F23"></i>Internal page: keys that route a search</span><span><i style="background:#C9D9CF"></i>Leaf page: the rows, fill shows how full</span></div>
+    </section>
+
+    <section class="card">
+      <h2>On disk</h2>
+      <div class="storage" id="storage"></div>
+      <div class="storage-actions"><button class="btn" id="checkpoint">Checkpoint</button><p class="hint">Copies the log into the database file and empties the log.</p></div>
+    </section>
+  </div>
+</main>
+
+<main id="torture" hidden>
+  <div class="intro">
+    <h1>We pulled the plug 10,000 times.</h1>
+    <p>One power cut in a demo shows recovery working. It doesn't prove it. So the database runs on a simulated disk that behaves like a real one when the power fails: anything synced survives, but each write since the last sync may land, vanish, or be <em>torn</em> half-way through.</p>
+    <p>Each scenario runs random transactions, cuts the power at a random moment (often in the middle of a commit or a checkpoint), restarts, and checks the promises below. A checker that never fails might be broken itself, so you can also switch on one of four classic durability bugs and watch it get caught.</p>
+  </div>
+  <div class="tgrid">
+    <section class="card">
+      <h2>Run the torture test</h2>
+      <fieldset class="bugs">
+        <legend>Which code should it test?</legend>
+        <label><input type="radio" name="bug" value="0" checked><span><strong>The real database</strong><br><small>Expect: every scenario passes</small></span></label>
+        <label><input type="radio" name="bug" value="1"><span><strong>Bug:</strong> report a commit as done before the log is synced to disk<br><small>Expect: committed data lost</small></span></label>
+        <label><input type="radio" name="bug" value="2"><span><strong>Bug:</strong> empty the log during a checkpoint before the database file is synced<br><small>Expect: data lost or corrupted</small></span></label>
+        <label><input type="radio" name="bug" value="4"><span><strong>Bug:</strong> trust log frames without checking their checksums<br><small>Expect: torn writes accepted as real data</small></span></label>
+        <label><input type="radio" name="bug" value="8"><span><strong>Bug:</strong> replay log frames from transactions that never committed<br><small>Expect: half-applied transactions</small></span></label>
+      </fieldset>
+      <div class="form">
+        <label>Power cuts <input type="number" id="runs" value="500" min="1" max="20000"></label>
+        <label>Starting seed <input type="number" id="seed" value="1" min="1"></label>
+      </div>
+      <button class="btn dark" id="runTorture">Start</button>
+      <div class="progress"><div id="bar"></div></div>
+      <div id="tresults"></div>
+    </section>
+    <section class="card">
+      <h2>The promises being checked</h2>
+      <dl class="promises">
+        <dt>Durability</dt><dd>Once COMMIT returns, the transaction survives any crash.</dd>
+        <dt>Atomicity</dt><dd>A transaction interrupted mid-commit is either all there or not there at all. Never half.</dd>
+        <dt>Integrity</dt><dd>After recovery, every B+ tree is structurally sound: keys sorted, balanced, sibling links intact.</dd>
+        <dt>Still works</dt><dd>The recovered database accepts new writes.</dd>
+      </dl>
+    </section>
+  </div>
+</main>
+
+<!--WASM-->
+<script src="app.js"></script>
+</body>
+</html>
