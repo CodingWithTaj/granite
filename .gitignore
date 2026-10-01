@@ -1,0 +1,9 @@
+granite
+granite.exe
+run-tests
+run-tests.exe
+web/granite.wasm
+site/
+*.db
+*.db-wal
+.DS_Store
