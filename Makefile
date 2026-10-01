@@ -18,6 +18,13 @@ run-tests$(EXE): $(CORE) tests/tests.cpp src/*.h
 test: run-tests$(EXE)
 	./run-tests$(EXE)
 
+diff-runner$(EXE): $(CORE) tests/diff_runner.cpp src/*.h
+	$(CXX) $(CXXFLAGS) $(CORE) tests/diff_runner.cpp -o $@
+
+# compare thousands of random queries against SQLite (needs python3)
+differential: diff-runner$(EXE)
+	python3 tests/differential.py 1 100
+
 torture: granite$(EXE)
 	./granite$(EXE) --torture 2000
 
@@ -28,6 +35,6 @@ web/granite.wasm: $(CORE) src/wasm.cpp src/*.h
 	  $(CORE) src/wasm.cpp -o $@ -Wl,--strip-all
 
 clean:
-	rm -f granite granite.exe run-tests run-tests.exe web/granite.wasm
+	rm -f granite granite.exe run-tests run-tests.exe diff-runner diff-runner.exe web/granite.wasm
 
-.PHONY: all test torture wasm clean
+.PHONY: all test differential torture wasm clean

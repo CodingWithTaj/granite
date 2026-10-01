@@ -95,9 +95,11 @@ EXPORT(g_pull_plug) void g_pull_plug(int midCommit) {
     bool wasInTxn = db->inTransaction();
     size_t dirty = db->pager().dirtyPages();
     bool cutDuringCommit = false;
-    if (midCommit && wasInTxn && dirty > 1) {
-        // allow some of the commit's page writes through, then the power dies
-        power.budget = int64_t(1 + rng.below(dirty - 1));
+    uint32_t framesBefore = db->pager().walFrames();
+    if (midCommit && wasInTxn && dirty >= 1) {
+        // let some (possibly all) of the commit's page writes through, then the
+        // power dies before the log is synced
+        power.budget = int64_t(rng.below(dirty + 1));
         db->execute("COMMIT");
         cutDuringCommit = power.failed;
     }
@@ -106,8 +108,12 @@ EXPORT(g_pull_plug) void g_pull_plug(int midCommit) {
     db = std::make_unique<Database>(dbFile, walFile, Bugs{}, 32);
     RecoveryReport rec = db->open();
     std::string integrity = db->check();
+    // Whether the interrupted commit made it: if every frame happened to reach
+    // the disk intact, recovery finds a complete commit and keeps it.
+    bool survived = cutDuringCommit && db->pager().walFrames() > framesBefore;
     result = "{\"recovery\":" + recoveryJson(rec) + ",\"wasInTransaction\":" + (wasInTxn ? "true" : "false") +
              ",\"dirtyPagesLost\":" + std::to_string(dirty) + ",\"cutDuringCommit\":" + (cutDuringCommit ? "true" : "false") +
+             ",\"transactionSurvived\":" + (survived ? "true" : "false") +
              ",\"writesDamaged\":" + std::to_string(damaged) + ",\"integrity\":" + jsonString(integrity) + ",\"stats\":" + statsJson() + "}";
 }
 

@@ -65,12 +65,17 @@ SQL text → tokenizer → parser → planner/executor → B+ trees → pager + 
 
 **Checkpoints** copy the latest version of each logged page into the database file, sync the file, and only then reset the log. Resetting the log first (one of the injectable bugs) loses data if the power dies in between.
 
-**The SQL engine** (`src/database.cpp`). A hand-written tokenizer and recursive-descent parser; `CREATE TABLE`, `DROP TABLE`, `INSERT`, `SELECT` with `WHERE`, inner `JOIN`, `GROUP BY`, `ORDER BY`, `LIMIT`, `COUNT/SUM/MIN/MAX/AVG`, `UPDATE`, `DELETE`, `BEGIN/COMMIT/ROLLBACK`, and `EXPLAIN`. The planner turns conditions on the primary key (`id = 5`, `id >= 10 AND id < 20`) into a B+ tree range seek, and joins on a primary key become index lookups instead of nested scans. Column names are checked before execution, so errors are reported even on empty tables.
+**The SQL engine** (`src/database.cpp`). A hand-written tokenizer and recursive-descent parser; `CREATE TABLE`, `DROP TABLE`, `INSERT`, `SELECT` with `WHERE`, inner `JOIN`, `GROUP BY`, `HAVING`, `ORDER BY` (by expression, alias or position), `LIMIT`, `COUNT/SUM/MIN/MAX/AVG`, `SELECT` without a table, `UPDATE`, `DELETE`, `BEGIN/COMMIT/ROLLBACK`, and `EXPLAIN`. The planner turns conditions on the primary key (`id = 5`, `id >= 10 AND id < 20`) into a B+ tree range seek, and joins on a primary key become index lookups instead of nested scans. Column names are checked before execution, so errors are reported even on empty tables.
+
+## Checked against SQLite
+
+The query engine is tested differentially: random tables and over 15,000 random queries, updates and deletes are run on both Granite and SQLite (the most heavily tested database there is), and every result must match. That covers `NULL` handling in comparisons and `AND`/`OR`/`NOT`, integer division and remainders (including by zero), grouping, `HAVING`, every aggregate, joins, and ordering with `LIMIT`. Current result: zero mismatches. The engine has also been run under AddressSanitizer and UndefinedBehaviorSanitizer through the full test suite and thousands of fuzzed, malformed statements, with no memory errors or undefined behavior.
 
 ## What the tests caught during development
 
 - **A dishonest statistic.** The "pages read" count, which the demo uses to show index lookups beating scans, ignored the leaf pages a cursor walked through, so a full scan looked almost as cheap as an index lookup. Leaf reads are now counted.
 - **A missing error.** `SELECT x FROM t` returned nothing instead of "no such column" when `t` was empty, because names were only resolved while evaluating rows. Every column reference is now checked before any row is touched.
+- **A wrong explanation.** Pulling the plug mid-commit usually destroys the transaction, but if every page of the commit happens to reach the disk before the power dies, recovery correctly keeps it. The demo announced "gone" either way. It now checks what recovery actually found, and a browser test verifies every claim against the data.
 - **A name clash.** WebAssembly's C library defines a `PAGE_SIZE` macro, which silently collided with Granite's own constant.
 
 ## Limits
@@ -83,7 +88,8 @@ You need a C++20 compiler (g++ 10+ or clang 12+) and `make`.
 
 ```bash
 make            # the granite shell
-make test       # 14 tests, including 1,500 crashes and the four injected bugs
+make test       # 15 tests, including 1,500 crashes and the four injected bugs
+make differential   # compare thousands of random queries against SQLite
 ./granite mydata.db                      # a database file (its log is mydata.db-wal)
 ./granite --torture 2000                 # crash it 2,000 times
 ./granite --torture 5000 --bug skipWalChecksum
@@ -98,7 +104,7 @@ make wasm WASI_SDK=/path/to/wasi-sdk
 python3 scripts/build_site.py      # site/index.html, and site/granite.html as one file
 ```
 
-Pushing to `main` runs the tests and a 5,000-crash torture run, builds the WebAssembly, and deploys the site.
+Pushing to `main` runs the tests, the SQLite comparison and a 5,000-crash torture run, builds the WebAssembly, and deploys the site.
 
 ## License
 

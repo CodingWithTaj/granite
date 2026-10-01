@@ -44,6 +44,20 @@ TEST(aggregates_and_group_by) {
     CHECK(cell(f.run("SELECT COUNT(*) FROM t WHERE n > 100"), 0, 0) == "0");
 }
 
+TEST(select_without_a_table_having_and_order_by_position) {
+    Fixture f;
+    CHECK(cell(f.run("SELECT 1 + 2 * 3 AS n"), 0, 0) == "7");
+    CHECK(f.run("SELECT 7 / 0").rows[0][0].isNull());
+    CHECK(f.run("SELECT * ").error.find("FROM") != std::string::npos);
+    f.run("CREATE TABLE t (id INTEGER PRIMARY KEY, city TEXT, n INTEGER)");
+    f.run("INSERT INTO t (city, n) VALUES ('A', 1), ('B', 5), ('A', 3), ('C', 2), ('B', 1), ('A', 9)");
+    auto r = f.run("SELECT city, COUNT(*) AS c FROM t GROUP BY city HAVING c >= 2 ORDER BY 2 DESC");
+    CHECK(r.error.empty() && r.rows.size() == 2 && cell(r, 0, 0) == "A" && cell(r, 1, 0) == "B");
+    r = f.run("SELECT city FROM t GROUP BY city HAVING SUM(n) > 5 ORDER BY 1");
+    CHECK(r.rows.size() == 2 && cell(r, 0, 0) == "A" && cell(r, 1, 0) == "B");
+    CHECK(f.run("SELECT city FROM t ORDER BY 3").error.find("out of range") != std::string::npos);
+}
+
 TEST(joins_use_the_primary_key) {
     Fixture f;
     f.run("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");

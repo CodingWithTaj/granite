@@ -88,7 +88,10 @@
     drawStatus();
     drawStorage();
     drawTree();
-    $("plugCommit").disabled = !state.stats.inTransaction || state.stats.dirty < 2;
+    const canCut = state.stats.inTransaction && state.stats.dirty >= 1;
+    $("plugCommit").disabled = !canCut;
+    $("plugCommit").title = canCut ? "Run COMMIT, and cut the power while it's being written"
+      : "Start a transaction (BEGIN) and change some data first";
   }
 
   function drawStatus() {
@@ -96,7 +99,8 @@
     let cls = "", h, p;
     if (plugged) {
       cls = "out";
-      h = plugged.cutDuringCommit ? "The power died mid-commit. The transaction is gone entirely: all or nothing."
+      h = plugged.cutDuringCommit && plugged.transactionSurvived ? "The power died mid-commit, but every page of the commit had reached the disk: the whole transaction survived."
+        : plugged.cutDuringCommit ? "The power died mid-commit. The transaction is gone entirely: all or nothing."
         : plugged.wasInTransaction ? "The power died with a transaction open. Its changes are gone; everything committed is intact."
         : "The power died, and every committed transaction came back.";
       p = (plugged.recovery.commitsRecovered
@@ -140,8 +144,9 @@
     })(root, 0);
     // fit the tree to the panel: leaves shrink (and drop their labels) as the table grows
     const avail = Math.max(280, $("treeWrap").clientWidth - 4);
-    const GAP = leaves.length > 24 ? 3 : 8, LH = 84;
-    const LW = Math.max(10, Math.min(58, (avail - 24) / leaves.length - GAP));
+    const slot = Math.min(66, (avail - 24) / leaves.length);
+    const GAP = slot >= 24 ? 8 : slot >= 10 ? 3 : 1, LH = 84;
+    const LW = Math.max(2, slot - GAP);
     leaves.forEach((l, i) => (l.x = 12 + i * (LW + GAP) + LW / 2));
     const label = (n) => (n.keys.length > 4 ? `${n.keys.slice(0, 3).join(" · ")} … ${n.keys.length} keys` : n.keys.join(" · "));
     (function place(n) {
@@ -176,7 +181,7 @@
         g += `<line x1="${n.x}" y1="${n.depth * LH + 40}" x2="${k.x}" y2="${k.depth * LH + 8}" stroke="${hot ? "#F25C05" : "#C3C8D0"}" stroke-width="${hot ? 2.5 : 1}"/>`;
       });
     }
-    for (let i = 0; i + 1 < leaves.length; i++) {
+    for (let i = 0; GAP >= 3 && i + 1 < leaves.length; i++) {
       const a = leaves[i], b = leaves[i + 1], y = a.depth * LH + 46;
       g += `<line x1="${a.x + LW / 2 - 2}" y1="${y}" x2="${b.x - LW / 2 + 2}" y2="${y}" stroke="#9AA2AD" stroke-width="1" marker-end="url(#arr)"/>`;
     }
@@ -237,7 +242,7 @@
 
   function run(sql) {
     if (sql === "__insert__") sql = insertUsers(300);
-        // a transaction is already open: run the rest without starting another
+    // a transaction is already open: run the rest without starting another
     if (state && state.stats.inTransaction) sql = sql.replace(/^\s*BEGIN\s*;\s*/i, "");
     plugged = null;
     $("report").innerHTML = "";
@@ -256,7 +261,8 @@
     lastKey = null;
     const r = plugged, rec = r.recovery;
     const steps = [];
-    if (r.cutDuringCommit) steps.push(`The power failed part-way through writing a commit: of its ${r.dirtyPagesLost} changed pages, some reached the log and the rest didn't.`);
+    if (r.cutDuringCommit && r.transactionSurvived) steps.push(`The power failed while the commit was being written, before the log was synced. By luck, all ${r.dirtyPagesLost} of its pages had already reached the disk intact, so recovery found a complete, valid commit and kept it. All or nothing: this time, all.`);
+    else if (r.cutDuringCommit) steps.push(`The power failed part-way through writing a commit: of its ${r.dirtyPagesLost} changed page${r.dirtyPagesLost === 1 ? "" : "s"}, not all reached the disk intact, so the commit is incomplete.`);
     else if (r.wasInTransaction) steps.push(`An open transaction with ${r.dirtyPagesLost} changed page${r.dirtyPagesLost === 1 ? "" : "s"} was lost. Those pages only ever existed in memory.`);
     else steps.push("No transaction was open, so nothing was in flight.");
     if (r.writesDamaged) steps.push(`${r.writesDamaged} disk write${r.writesDamaged === 1 ? " that hadn't been synced was" : "s that hadn't been synced were"} lost or torn, as happens in a real power cut.`);
@@ -265,7 +271,7 @@
       : "On restart, recovery found no committed changes waiting in the log: everything committed was already in the database file.");
     if (rec.framesDiscarded) steps.push(`It discarded <b>${rec.framesDiscarded}</b> frames that weren't part of a complete commit; checksums reject torn ones.`);
     steps.push(r.integrity ? `Integrity check failed: ${esc(r.integrity)}` : `<span class="ok">Every B+ tree passed its integrity check.</span>`);
-    $("report").innerHTML = `<div class="report"><h3> Power cut, restart, recovery</h3><ol>${steps.map((s) => `<li>${s}</li>`).join("")}</ol></div>`;
+    $("report").innerHTML = `<div class="report"><h3>Power cut, restart, recovery</h3><ol>${steps.map((s) => `<li>${s}</li>`).join("")}</ol></div>`;
     renderResults([], "");
     $("results").innerHTML = `<p class="hint">The database restarted. Run a query to see what survived.</p>`;
     refresh();

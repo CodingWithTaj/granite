@@ -201,8 +201,9 @@ struct Stmt {
     std::vector<std::vector<ExprP>> values;
     std::vector<SelectItem> items;
     TableRef from;
+    bool noFrom = false;  // SELECT 1 + 1
     std::optional<TableRef> join;
-    ExprP on, where;
+    ExprP on, where, having;
     std::vector<ExprP> groupBy;
     std::vector<std::pair<ExprP, bool>> orderBy;  // bool = descending
     int64_t limit = -1;
@@ -241,7 +242,7 @@ private:
     bool ident(std::string& out, const char* what) {
         static const std::set<std::string> reserved = {"select", "from", "where", "insert", "into", "values", "update", "set",
             "delete", "create", "table", "drop", "join", "on", "group", "order", "by", "limit", "and", "or", "not", "null",
-            "is", "as", "begin", "commit", "rollback", "inner", "asc", "desc", "primary", "key", "explain"};
+            "is", "as", "begin", "commit", "rollback", "inner", "asc", "desc", "primary", "key", "explain", "having"};
         if (peek().t != T::Ident || reserved.count(peek().v)) return fail(std::string("expected ") + what);
         out = peek().v;
         i_++;
@@ -339,7 +340,7 @@ private:
     bool tableRef(TableRef& r) {
         if (!ident(r.name, "a table name")) return false;
         eat("as");
-        if (peek().t == T::Ident && !is("join") && !is("inner") && !is("where") && !is("on") && !is("group") && !is("order") && !is("limit"))
+        if (peek().t == T::Ident && !is("join") && !is("inner") && !is("where") && !is("on") && !is("group") && !is("order") && !is("limit") && !is("having"))
             return ident(r.alias, "an alias");
         return true;
     }
@@ -361,7 +362,14 @@ bool Parser::select(Stmt& s) {
         }
         s.items.push_back(it);
     } while (eatSym(","));
-    if (!expectKw("from") || !tableRef(s.from)) return false;
+    if (!eat("from")) {
+        // a SELECT without a table evaluates its expressions once
+        s.noFrom = true;
+        for (auto& it : s.items) if (it.star) return fail("SELECT * needs a FROM clause");
+        if (!sym(";") && peek().t != T::End) return fail("expected FROM");
+        return true;
+    }
+    if (!tableRef(s.from)) return false;
     if (is("join") || (is("inner") && is("join", 1))) {
         eat("inner");
         i_++;
@@ -375,6 +383,7 @@ bool Parser::select(Stmt& s) {
         if (!expectKw("by")) return false;
         do { auto g = expr(); if (!g) return false; s.groupBy.push_back(g); } while (eatSym(","));
     }
+    if (eat("having") && !(s.having = expr())) return false;
     if (eat("order")) {
         if (!expectKw("by")) return false;
         do {
@@ -794,7 +803,39 @@ struct Executor {
         res.message = std::string(s.k == Stmt::Delete ? "Deleted " : "Updated ") + std::to_string(hits.size()) + " row" + (hits.size() == 1 ? "" : "s") + ".";
     }
 
+    /// Evaluate a HAVING condition on one group: aggregates over its rows, and
+    /// output-column aliases (SELECT COUNT(*) AS n ... HAVING n > 2) by value.
+    Value havingValue(const Expr& e, const Scope& sc, const std::vector<std::vector<Value>>& rows,
+                      const std::vector<std::string>& names, const std::vector<Value>& outVals) {
+        if (e.k == Expr::Col && e.table.empty()) {
+            for (size_t c = 0; c < names.size(); c++) if (names[c] == e.name) {
+                std::string ignore;
+                if (sc.find(e, ignore) < 0) return outVals[c];
+            }
+        }
+        if (e.k == Expr::Not) { Value a = havingValue(*e.a, sc, rows, names, outVals); return a.isNull() ? a : Value::integer(!truthy(a)); }
+        if (e.k == Expr::IsNull) return Value::integer(havingValue(*e.a, sc, rows, names, outVals).isNull() != e.negate);
+        if (e.k == Expr::Neg) { Value a = havingValue(*e.a, sc, rows, names, outVals); return a.kind == Value::Kind::Int ? Value::integer(-a.i) : a.kind == Value::Kind::Real ? Value::real(-a.r) : Value{}; }
+        if (e.k == Expr::Bin) return binary(e.op, havingValue(*e.a, sc, rows, names, outVals), havingValue(*e.b, sc, rows, names, outVals));
+        return aggregate(e, sc, rows);
+    }
+
     void select(const Stmt& s, Result& res) {
+        if (s.noFrom) {
+            Scope none;
+            res.isQuery = true;
+            std::vector<Value> row;
+            for (auto& it : s.items) {
+                if (hasAggregate(it.e.get())) { err = "aggregate functions need a FROM clause"; return; }
+                row.push_back(eval(*it.e, none, {}));
+                res.columns.push_back(!it.alias.empty() ? it.alias : it.e->text);
+            }
+            if (!err.empty()) return;
+            res.rows.push_back(row);
+            res.plan.push_back("CONSTANT (no table to read)");
+            if (s.explain) { res.columns = {"plan"}; res.rows = {{Value::text(res.plan[0])}}; }
+            return;
+        }
         auto left = need(s.from.name);
         if (!left) return;
         std::string la = s.from.alias.empty() ? left->name : s.from.alias;
@@ -815,7 +856,7 @@ struct Executor {
                 if (!it.star && !validate(it.e.get(), sc)) return;
                 if (!it.alias.empty()) outNames.push_back(it.alias);
             }
-            if (!validate(s.on.get(), sc) || !validate(s.where.get(), sc)) return;
+            if (!validate(s.on.get(), sc) || !validate(s.where.get(), sc) || !validate(s.having.get(), sc, &outNames)) return;
             for (auto& g : s.groupBy) if (!validate(g.get(), sc)) return;
             for (auto& [o, d] : s.orderBy) if (!validate(o.get(), sc, &outNames)) return;
         }
@@ -879,7 +920,7 @@ struct Executor {
                 res.columns.push_back(!it.alias.empty() ? it.alias : it.e->k == Expr::Col ? it.e->name : it.e->text);
             }
         }
-        bool grouped = !s.groupBy.empty();
+        bool grouped = !s.groupBy.empty() || s.having;
         for (auto& o : outs) grouped = grouped || hasAggregate(o.get());
 
         // each output row keeps its source rows, so ORDER BY can refer to either
@@ -899,8 +940,10 @@ struct Executor {
                 Out o;
                 o.src = groups[key];
                 for (auto& e : outs) o.vals.push_back(aggregate(*e, sc, o.src));
+                if (s.having && !truthy(havingValue(*s.having, sc, o.src, res.columns, o.vals))) continue;
                 out.push_back(std::move(o));
             }
+            if (s.having) res.plan.push_back("FILTER groups by HAVING");
         } else {
             for (auto& row : rows) {
                 Out o;
@@ -917,7 +960,15 @@ struct Executor {
             for (size_t i = 0; i < out.size(); i++) {
                 for (auto& [e, desc] : s.orderBy) {
                     int col = -1;
-                    for (size_t c = 0; c < res.columns.size(); c++) {
+                    if (e->k == Expr::Lit && e->lit.kind == Value::Kind::Int) {
+                        // ORDER BY 2 means the second output column
+                        if (e->lit.i < 1 || size_t(e->lit.i) > res.columns.size()) {
+                            err = "ORDER BY position " + std::to_string(e->lit.i) + " is out of range (there are " + std::to_string(res.columns.size()) + " columns)";
+                            return;
+                        }
+                        col = int(e->lit.i - 1);
+                    }
+                    for (size_t c = 0; c < res.columns.size() && col < 0; c++) {
                         if ((e->k == Expr::Col && e->table.empty() && res.columns[c] == e->name) || res.columns[c] == e->text) col = int(c);
                     }
                     keys[i].push_back(col >= 0 ? out[i].vals[size_t(col)] : grouped ? aggregate(*e, sc, out[i].src) : eval(*e, sc, out[i].src.front()));
