@@ -22,7 +22,7 @@ jobs:
       - name: Build and run the tests
         run: make test
       - name: Torture test (5,000 power cuts)
-        run: ./granite --torture 5000
+        run: make granite && ./granite --torture 5000
 
   site:
     needs: test
