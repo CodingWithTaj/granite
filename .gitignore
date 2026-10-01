@@ -7,3 +7,5 @@ site/
 *.db
 *.db-wal
 .DS_Store
+diff-runner
+diff-runner.exe
