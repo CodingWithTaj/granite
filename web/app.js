@@ -265,7 +265,7 @@
       : "On restart, recovery found no committed changes waiting in the log: everything committed was already in the database file.");
     if (rec.framesDiscarded) steps.push(`It discarded <b>${rec.framesDiscarded}</b> frames that weren't part of a complete commit; checksums reject torn ones.`);
     steps.push(r.integrity ? `Integrity check failed: ${esc(r.integrity)}` : `<span class="ok">Every B+ tree passed its integrity check.</span>`);
-    $("report").innerHTML = `<div class="report"><h3>⏻ Power cut, restart, recovery</h3><ol>${steps.map((s) => `<li>${s}</li>`).join("")}</ol></div>`;
+    $("report").innerHTML = `<div class="report"><h3> Power cut, restart, recovery</h3><ol>${steps.map((s) => `<li>${s}</li>`).join("")}</ol></div>`;
     renderResults([], "");
     $("results").innerHTML = `<p class="hint">The database restarted. Run a query to see what survived.</p>`;
     refresh();
