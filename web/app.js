@@ -237,6 +237,8 @@
 
   function run(sql) {
     if (sql === "__insert__") sql = insertUsers(300);
+        // a transaction is already open: run the rest without starting another
+    if (state && state.stats.inTransaction) sql = sql.replace(/^\s*BEGIN\s*;\s*/i, "");
     plugged = null;
     $("report").innerHTML = "";
     const res = exec(sql);

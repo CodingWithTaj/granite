@@ -1027,7 +1027,7 @@ std::vector<Result> Database::execute(const std::string& sql) {
             break;
         }
         if (s.k == Stmt::Begin) {
-            if (explicitTxn_) res.error = "already in a transaction";
+            if (explicitTxn_) res.error = "a transaction is already open: COMMIT or ROLLBACK it first";
             else { pager_.begin(); explicitTxn_ = true; res.message = "Transaction started. Changes stay private until COMMIT."; }
         } else if (s.k == Stmt::Commit) {
             if (!explicitTxn_) res.error = "no transaction to commit";
