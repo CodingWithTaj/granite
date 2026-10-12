@@ -704,6 +704,12 @@ struct Executor {
     void drop(const Stmt& s, Result& res) {
         auto t = need(s.table);
         if (!t) return;
+        // Give every page of the table's B+ tree back to the free list, so a later
+        // CREATE TABLE or insert can reuse them instead of growing the file.
+        BTree tree(db.pager_, t->root);
+        for (uint32_t pg : tree.pages()) {
+            if (!db.pager_.free(pg)) { err = "internal error: could not free page " + std::to_string(pg); return; }
+        }
         BTree catalog(db.pager_, CATALOG_ROOT);
         catalog.remove(t->id);
         res.message = "Dropped table " + t->name + ".";

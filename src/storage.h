@@ -14,6 +14,14 @@ namespace granite {
 constexpr uint32_t PAGE_BYTES = 4096;
 using Page = std::array<uint8_t, PAGE_BYTES>;
 
+// Free list. Page 0 (the header) starts with the 16-byte magic, then the head of a
+// linked list of unused pages and how many there are (zeros = empty, so files made
+// before the free list existed still open). Each free page is tagged FREE_PAGE and
+// stores the page number of the next free page. The B+ tree uses tags 1 and 2.
+constexpr uint32_t HEADER_PAGE = 0, FIRST_FREEABLE_PAGE = 2;  // page 1 is the catalog root
+constexpr size_t HEADER_FREE_HEAD = 16, HEADER_FREE_COUNT = 20;
+constexpr uint8_t FREE_PAGE = 3;
+
 /// Deliberate bugs that can be switched on to prove the crash harness catches them.
 struct Bugs {
     bool commitWithoutSync = false;         // report a commit as done before the log reaches the disk
@@ -143,7 +151,15 @@ public:
     RecoveryReport open();
     bool get(uint32_t pgno, Page& out);
     void put(uint32_t pgno, const Page& page);
+    /// A fresh zeroed page: the head of the free list if there is one, else a new page at the end.
     uint32_t allocate();
+    /// Give a page back for reuse. Refuses (returns false) the header, the catalog root,
+    /// pages past the end, and pages that are already free.
+    bool free(uint32_t pgno);
+    uint32_t freeHead() const;
+    uint32_t freeCount() const;
+    /// Read a page as of this transaction without touching the cache or its statistics.
+    bool peek(uint32_t pgno, Page& out) const;
     uint32_t pageCount() const { return txnPages_; }
     void begin();
     void commit();

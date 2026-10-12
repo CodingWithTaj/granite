@@ -298,11 +298,61 @@ bool Pager::get(uint32_t pgno, Page& out) {
 
 void Pager::put(uint32_t pgno, const Page& page) { dirty_[pgno] = page; }
 
+namespace {
+uint32_t rd32(const uint8_t* p) { return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24; }
+void wr32(uint8_t* p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = uint8_t(v >> (8 * i)); }
+}  // namespace
+
+bool Pager::peek(uint32_t pgno, Page& out) const {
+    if (pgno >= txnPages_) return false;
+    auto d = dirty_.find(pgno);
+    if (d != dirty_.end()) { out = d->second; return true; }
+    auto c = cache_.find(pgno);
+    if (c != cache_.end()) { out = c->second->second; return true; }
+    if (!wal_.readPage(pgno, out)) db_.read(uint64_t(pgno) * PAGE_BYTES, out.data(), PAGE_BYTES);
+    return true;
+}
+
+uint32_t Pager::freeHead() const {
+    Page h;
+    return peek(HEADER_PAGE, h) ? rd32(&h[HEADER_FREE_HEAD]) : 0;
+}
+
+uint32_t Pager::freeCount() const {
+    Page h;
+    return peek(HEADER_PAGE, h) ? rd32(&h[HEADER_FREE_COUNT]) : 0;
+}
+
 uint32_t Pager::allocate() {
-    Page zero{};
+    Page header;
+    // While the header itself is being created there is no free list to consult.
+    if (peek(HEADER_PAGE, header)) {
+        uint32_t head = rd32(&header[HEADER_FREE_HEAD]);
+        Page freePg;
+        if (head && peek(head, freePg) && freePg[0] == FREE_PAGE) {
+            wr32(&header[HEADER_FREE_HEAD], rd32(&freePg[1]));
+            wr32(&header[HEADER_FREE_COUNT], rd32(&header[HEADER_FREE_COUNT]) - 1);
+            dirty_[HEADER_PAGE] = header;
+            dirty_[head] = Page{};
+            return head;
+        }
+    }
     uint32_t pgno = txnPages_++;
-    dirty_[pgno] = zero;
+    dirty_[pgno] = Page{};
     return pgno;
+}
+
+bool Pager::free(uint32_t pgno) {
+    Page header, pg;
+    if (pgno < FIRST_FREEABLE_PAGE || !peek(pgno, pg) || pg[0] == FREE_PAGE || !peek(HEADER_PAGE, header)) return false;
+    Page freed{};
+    freed[0] = FREE_PAGE;
+    wr32(&freed[1], rd32(&header[HEADER_FREE_HEAD]));
+    wr32(&header[HEADER_FREE_HEAD], pgno);
+    wr32(&header[HEADER_FREE_COUNT], rd32(&header[HEADER_FREE_COUNT]) + 1);
+    dirty_[pgno] = freed;
+    dirty_[HEADER_PAGE] = header;
+    return true;
 }
 
 void Pager::begin() {

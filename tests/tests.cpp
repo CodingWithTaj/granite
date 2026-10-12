@@ -200,6 +200,165 @@ TEST(checkpoint_moves_the_log_into_the_database_file) {
     CHECK(db.execute("SELECT COUNT(*) FROM t").back().rows[0][0].i == 2);
 }
 
+// ---- free list
+
+// Run `fn` inside one pager transaction and commit it.
+static void inTxn(Database& db, const std::function<void(Pager&)>& fn) {
+    db.pager().begin();
+    fn(db.pager());
+    db.pager().commit();
+}
+
+TEST(free_then_allocate_reuses_page) {
+    Fixture f;
+    uint32_t a = 0, b = 0, c = 0;
+    inTxn(f.db, [&](Pager& p) { a = p.allocate(); b = p.allocate(); });
+    uint32_t pages = f.db.pager().pageCount();
+    inTxn(f.db, [&](Pager& p) { CHECK(p.free(a)); CHECK(p.free(b)); });
+    CHECK(f.db.pager().freeCount() == 2 && f.db.pager().freeHead() == b);  // last freed is the head
+    inTxn(f.db, [&](Pager& p) { c = p.allocate(); });
+    CHECK(c == b && f.db.pager().freeCount() == 1 && f.db.pager().pageCount() == pages);
+    inTxn(f.db, [&](Pager& p) { c = p.allocate(); });
+    CHECK(c == a && f.db.pager().freeCount() == 0 && f.db.pager().freeHead() == 0);
+    inTxn(f.db, [&](Pager& p) { c = p.allocate(); });  // list empty: the file grows again
+    CHECK(c == pages && f.db.pager().pageCount() == pages + 1);
+    Page pg;
+    CHECK(f.db.pager().get(a, pg) && pg[0] == 0 && pg[1] == 0);  // reused pages come back zeroed
+}
+
+TEST(drop_table_returns_pages_to_free_list) {
+    Fixture f;
+    std::string pad(100, 'x');
+    uint32_t firstSize = 0;
+    for (int round = 0; round < 5; round++) {
+        CHECK(f.run("CREATE TABLE x (id INTEGER PRIMARY KEY, v TEXT)").error.empty());
+        for (int i = 0; i < 1000; i += 50) {
+            std::string sql = "INSERT INTO x (id, v) VALUES ";
+            for (int k = i; k < i + 50; k++) sql += (k > i ? ",(" : "(") + std::to_string(k) + ",'" + pad + "')";
+            CHECK(f.run(sql).error.empty());
+        }
+        CHECK(f.run("DROP TABLE x").error.empty());
+        CHECK(f.db.check().empty());
+        if (round == 0) firstSize = f.db.pager().pageCount();
+        CHECK(f.db.pager().pageCount() == firstSize);  // later rounds reuse the dropped pages
+    }
+    CHECK(f.db.pager().freeCount() > 50);
+    // the pages come back for ordinary use too
+    CHECK(f.run("CREATE TABLE y (id INTEGER PRIMARY KEY, v TEXT)").error.empty());
+    CHECK(f.run("INSERT INTO y (id, v) VALUES (1, 'a')").error.empty());
+    CHECK(cell(f.run("SELECT v FROM y WHERE id = 1"), 0, 0) == "a");
+    CHECK(f.db.pager().pageCount() == firstSize);
+    CHECK(f.db.check().empty());
+}
+
+TEST(rollback_undoes_free_and_allocate) {
+    Fixture f;
+    uint32_t a = 0;
+    inTxn(f.db, [&](Pager& p) { a = p.allocate(); p.allocate(); });
+    uint32_t pages = f.db.pager().pageCount();
+    // a rolled-back free leaves the page in use
+    f.db.pager().begin();
+    CHECK(f.db.pager().free(a));
+    CHECK(f.db.pager().freeCount() == 1);
+    f.db.pager().rollback();
+    CHECK(f.db.pager().freeCount() == 0 && f.db.pager().freeHead() == 0);
+    // and a rolled-back allocation of a free page leaves it free
+    inTxn(f.db, [&](Pager& p) { CHECK(p.free(a)); });
+    f.db.pager().begin();
+    CHECK(f.db.pager().allocate() == a && f.db.pager().freeCount() == 0);
+    f.db.pager().rollback();
+    CHECK(f.db.pager().freeCount() == 1 && f.db.pager().freeHead() == a);
+    CHECK(f.db.pager().pageCount() == pages);
+    // same through SQL: a dropped table inside a rolled-back BEGIN is still there
+    f.run("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+    f.run("INSERT INTO t (v) VALUES ('keep')");
+    uint32_t before = f.db.pager().freeCount();
+    f.run("BEGIN");
+    f.run("DROP TABLE t");
+    CHECK(f.db.pager().freeCount() > before);
+    f.run("ROLLBACK");
+    CHECK(f.db.pager().freeCount() == before);
+    CHECK(cell(f.run("SELECT v FROM t"), 0, 0) == "keep");
+    CHECK(f.db.check().empty());
+}
+
+TEST(free_list_survives_reopen) {
+    MemFile dbFile, walFile;
+    uint32_t head = 0, count = 0;
+    {
+        Database db(dbFile, walFile);
+        db.open();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+        db.execute("INSERT INTO t (v) VALUES ('a'), ('b')");
+        db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY, v TEXT)");
+        db.execute("DROP TABLE t");
+        head = db.pager().freeHead();
+        count = db.pager().freeCount();
+        CHECK(count > 0 && head >= FIRST_FREEABLE_PAGE);
+        CHECK(db.pager().walFrames() > 0);  // not checkpointed: the list lives only in the log
+    }
+    {
+        Database db(dbFile, walFile);  // recovery replays the log
+        db.open();
+        CHECK(db.pager().freeHead() == head && db.pager().freeCount() == count);
+        CHECK(db.check().empty());
+        db.checkpoint();               // now it lives in the database file itself
+    }
+    {
+        Database db(dbFile, walFile);
+        db.open();
+        CHECK(db.pager().walFrames() == 0);
+        CHECK(db.pager().freeHead() == head && db.pager().freeCount() == count);
+        uint32_t pages = db.pager().pageCount();
+        CHECK(db.execute("CREATE TABLE v (id INTEGER PRIMARY KEY)").back().error.empty());
+        CHECK(db.pager().pageCount() == pages && db.pager().freeCount() == count - 1);  // reused, not grown
+        CHECK(db.check().empty());
+    }
+}
+
+TEST(free_refuses_reserved_missing_and_already_free_pages) {
+    Fixture f;
+    uint32_t a = 0;
+    inTxn(f.db, [&](Pager& p) { a = p.allocate(); });
+    f.db.pager().begin();
+    Pager& p = f.db.pager();
+    CHECK(!p.free(0));                      // the header
+    CHECK(!p.free(1));                      // the catalog root
+    CHECK(!p.free(p.pageCount()));          // past the end
+    CHECK(!p.free(p.pageCount() + 100));
+    CHECK(p.free(a));
+    CHECK(!p.free(a));                      // double free
+    CHECK(p.freeCount() == 1);              // the refused calls changed nothing
+    p.rollback();
+    CHECK(f.db.check().empty());
+}
+
+TEST(a_database_without_free_list_fields_opens_and_works) {
+    // Files written before the free list existed have zeros after the magic, which
+    // is exactly an empty list. A brand-new header has the same bytes.
+    MemFile dbFile, walFile;
+    {
+        Database db(dbFile, walFile);
+        db.open();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+        db.execute("INSERT INTO t (v) VALUES ('old')");
+        db.checkpoint();
+    }
+    std::vector<uint8_t> hdr(PAGE_BYTES);
+    dbFile.read(0, hdr.data(), PAGE_BYTES);
+    CHECK(std::string(hdr.begin(), hdr.begin() + 16) == "GRANITE format 1");
+    for (size_t i = 16; i < 24; i++) CHECK(hdr[i] == 0);
+    Database db(dbFile, walFile);
+    db.open();
+    CHECK(db.pager().freeHead() == 0 && db.pager().freeCount() == 0);
+    CHECK(cell(db.execute("SELECT v FROM t").back(), 0, 0) == "old");
+    uint32_t pages = db.pager().pageCount();
+    CHECK(db.execute("CREATE TABLE u (id INTEGER PRIMARY KEY)").back().error.empty());
+    CHECK(db.pager().pageCount() == pages + 1);  // empty list: allocation grows the file as before
+    CHECK(db.execute("DROP TABLE u").back().error.empty() && db.pager().freeCount() == 1);
+    CHECK(db.check().empty());
+}
+
 TEST(crash_torture_finds_no_problems_in_the_real_engine) {
     TortureSummary s = tortureMany(1, 1500);
     if (s.failures) std::printf("    seed %llu: %s\n", (unsigned long long)s.firstFailure.seed, s.firstFailure.failure.c_str());
