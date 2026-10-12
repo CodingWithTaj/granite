@@ -1060,11 +1060,45 @@ std::string Database::check() {
     BTree catalog(pager_, CATALOG_ROOT);
     std::string err = catalog.check();
     if (!err.empty()) return "catalog: " + err;
+    // Every page must have exactly one purpose: the header, a page of some B+ tree,
+    // or a page on the free list. A page with two owners is corruption; a page with
+    // none is a leak (the file has space nobody can ever use again).
+    uint32_t total = pager_.pageCount();
+    std::vector<std::string> owner(total);
+    if (total) owner[HEADER_PAGE] = "the header";
+    auto claim = [&](uint32_t pg, const std::string& who) -> std::string {
+        if (pg >= total) return who + " uses page " + std::to_string(pg) + ", past the end of the file";
+        if (!owner[pg].empty()) return "page " + std::to_string(pg) + " is used by both " + owner[pg] + " and " + who;
+        owner[pg] = who;
+        return "";
+    };
+    for (uint32_t pg : catalog.pages()) {
+        err = claim(pg, "the catalog");
+        if (!err.empty()) return err;
+    }
     for (auto& t : tables()) {
         BTree tree(pager_, t.root);
         err = tree.check();
         if (!err.empty()) return t.name + ": " + err;
+        for (uint32_t pg : tree.pages()) {
+            err = claim(pg, "table " + t.name);
+            if (!err.empty()) return err;
+        }
     }
+    uint32_t listed = 0;
+    Page pg;
+    for (uint32_t cur = pager_.freeHead(); cur != 0; listed++) {
+        if (cur < FIRST_FREEABLE_PAGE || !pager_.peek(cur, pg)) return "the free list points at page " + std::to_string(cur) + ", which can't be free";
+        if (owner[cur] == "the free list") return "the free list loops back on itself at page " + std::to_string(cur);  // also ends the walk
+        if (pg[0] != FREE_PAGE) return "page " + std::to_string(cur) + " is on the free list but is in use (" + (owner[cur].empty() ? "not tagged free" : owner[cur]) + ")";
+        err = claim(cur, "the free list");
+        if (!err.empty()) return err;
+        cur = uint32_t(pg[1]) | uint32_t(pg[2]) << 8 | uint32_t(pg[3]) << 16 | uint32_t(pg[4]) << 24;
+    }
+    if (listed != pager_.freeCount())
+        return "the header says " + std::to_string(pager_.freeCount()) + " free pages but the list has " + std::to_string(listed);
+    for (uint32_t i = 0; i < total; i++)
+        if (owner[i].empty()) return "page " + std::to_string(i) + " is leaked: it is neither in use nor on the free list";
     return "";
 }
 

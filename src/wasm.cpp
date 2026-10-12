@@ -40,6 +40,7 @@ Bugs bugsFrom(int mask) {
     b.checkpointResetsWalFirst = mask & 2;
     b.skipWalChecksum = mask & 4;
     b.replayUncommittedFrames = mask & 8;
+    b.allocateKeepsFreePage = mask & 16;
     return b;
 }
 }  // namespace

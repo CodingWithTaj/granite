@@ -37,6 +37,18 @@ std::string diff(const Model& want, const Model& got) {
     for (auto& [k, v] : got) if (!want.count(k)) return "row " + std::to_string(k) + " shouldn't exist";
     return "";
 }
+
+// The scratch table is created and dropped over and over so that crashes land while
+// pages are being freed and reused. -1 means it doesn't exist, otherwise its row count.
+constexpr int NO_SCRATCH = -1;
+
+int scratchRows(Database& db) {
+    auto res = db.execute("SELECT COUNT(*) FROM scratch");
+    if (res.empty() || !res.back().error.empty() || res.back().rows.empty()) return NO_SCRATCH;
+    return int(res.back().rows[0][0].i);
+}
+
+std::string scratchName(int rows) { return rows == NO_SCRATCH ? "doesn't exist" : "has " + std::to_string(rows) + " rows"; }
 }  // namespace
 
 TortureResult tortureRun(uint64_t seed, const Bugs& bugs) {
@@ -48,6 +60,7 @@ TortureResult tortureRun(uint64_t seed, const Bugs& bugs) {
     Model committed;           // what the database has promised to keep
     Model inFlight;            // a transaction whose commit was interrupted
     bool ambiguous = false;    // ...which may legitimately be all there, or not at all
+    int committedScratch = NO_SCRATCH, inFlightScratch = NO_SCRATCH;
 
     {
         // a tiny buffer pool forces evictions and re-reads from the log
@@ -59,9 +72,24 @@ TortureResult tortureRun(uint64_t seed, const Bugs& bugs) {
 
         for (int txn = 0; txn < 120 && !power.failed; txn++) {
             Model pending = committed;
+            int pendingScratch = committedScratch;
             db.execute("BEGIN");
             int ops = int(1 + rng.below(rng.chance(0.3) ? 40 : 6));
             for (int k = 0; k < ops; k++) {
+                if (rng.chance(0.08)) {
+                    if (pendingScratch == NO_SCRATCH) {
+                        pendingScratch = int(1 + rng.below(80));
+                        std::string sql = "CREATE TABLE scratch (id INTEGER PRIMARY KEY, val TEXT)";
+                        db.execute(sql);
+                        sql = "INSERT INTO scratch VALUES ";
+                        for (int i = 1; i <= pendingScratch; i++) sql += std::string(i > 1 ? ", (" : "(") + std::to_string(i) + ", '" + randomText(rng) + "')";
+                        db.execute(sql);
+                    } else {
+                        pendingScratch = NO_SCRATCH;
+                        db.execute("DROP TABLE scratch");
+                    }
+                    continue;
+                }
                 int64_t key = int64_t(1 + rng.below(rng.chance(0.5) ? 40 : 600));
                 double x = double(rng.below(1000)) / 1000;
                 std::string sql;
@@ -83,9 +111,11 @@ TortureResult tortureRun(uint64_t seed, const Bugs& bugs) {
                 // the power died during the commit: all or nothing is acceptable
                 r.crashedMidCommit = ambiguous = true;
                 inFlight = pending;
+                inFlightScratch = pendingScratch;
                 break;
             }
             committed = pending;
+            committedScratch = pendingScratch;
             r.committed++;
             if (rng.chance(0.2)) {
                 db.checkpoint();
@@ -107,10 +137,16 @@ TortureResult tortureRun(uint64_t seed, const Bugs& bugs) {
     Model got;
     std::string err;
     if (!readAll(db, got, err)) return fail("can't read the table after recovery: " + err);
-    std::string vsCommitted = diff(committed, got);
+    int gotScratch = scratchRows(db);
+    auto compare = [&](const Model& want, int wantScratch) {
+        std::string d = diff(want, got);
+        if (d.empty() && gotScratch != wantScratch) d = "the scratch table " + scratchName(gotScratch) + " instead of " + scratchName(wantScratch);
+        return d;
+    };
+    std::string vsCommitted = compare(committed, committedScratch);
     if (!vsCommitted.empty()) {
         if (!ambiguous) return fail("a committed transaction was damaged: " + vsCommitted);
-        std::string vsInFlight = diff(inFlight, got);
+        std::string vsInFlight = compare(inFlight, inFlightScratch);
         if (!vsInFlight.empty())
             return fail("a transaction interrupted mid-commit was half-applied: " + vsCommitted + " compared with before it, and " + vsInFlight + " compared with after it");
     }
@@ -118,6 +154,14 @@ TortureResult tortureRun(uint64_t seed, const Bugs& bugs) {
     auto res = db.execute("INSERT INTO kv VALUES (100000, 'after recovery')");
     if (res.empty() || !res.back().error.empty()) return fail("can't write after recovery: " + (res.empty() ? "" : res.back().error));
     if (!readAll(db, got, err) || !got.count(100000)) return fail("a write after recovery didn't stick");
+    // ...including allocating pages (reusing freed ones) and dropping them again
+    for (const char* sql : {"CREATE TABLE after_recovery (id INTEGER PRIMARY KEY, val TEXT)",
+                            "INSERT INTO after_recovery VALUES (1, 'a'), (2, 'b'), (3, 'c')", "DROP TABLE after_recovery"}) {
+        res = db.execute(sql);
+        if (res.empty() || !res.back().error.empty()) return fail("can't change the schema after recovery: " + (res.empty() ? "" : res.back().error));
+    }
+    corrupt = db.check();
+    if (!corrupt.empty()) return fail("the database is corrupt after writing to it again: " + corrupt);
     return r;
 }
 

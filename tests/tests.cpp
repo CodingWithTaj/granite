@@ -253,8 +253,8 @@ TEST(drop_table_returns_pages_to_free_list) {
 
 TEST(rollback_undoes_free_and_allocate) {
     Fixture f;
-    uint32_t a = 0;
-    inTxn(f.db, [&](Pager& p) { a = p.allocate(); p.allocate(); });
+    uint32_t a = 0, b = 0;
+    inTxn(f.db, [&](Pager& p) { a = p.allocate(); b = p.allocate(); });
     uint32_t pages = f.db.pager().pageCount();
     // a rolled-back free leaves the page in use
     f.db.pager().begin();
@@ -279,6 +279,7 @@ TEST(rollback_undoes_free_and_allocate) {
     f.run("ROLLBACK");
     CHECK(f.db.pager().freeCount() == before);
     CHECK(cell(f.run("SELECT v FROM t"), 0, 0) == "keep");
+    inTxn(f.db, [&](Pager& p) { CHECK(p.free(b)); });  // b was only ever a raw page; return it so check() sees no leak
     CHECK(f.db.check().empty());
 }
 
@@ -329,7 +330,7 @@ TEST(free_refuses_reserved_missing_and_already_free_pages) {
     CHECK(p.free(a));
     CHECK(!p.free(a));                      // double free
     CHECK(p.freeCount() == 1);              // the refused calls changed nothing
-    p.rollback();
+    p.commit();                             // a is now properly free, so check() sees no leak
     CHECK(f.db.check().empty());
 }
 
@@ -359,6 +360,50 @@ TEST(a_database_without_free_list_fields_opens_and_works) {
     CHECK(db.check().empty());
 }
 
+// Corrupt the free list by hand inside an open transaction (never committed) and
+// make sure check() notices: a checker that can't fail proves nothing.
+static std::string checkAfter(Fixture& f, const std::function<void(Pager&)>& corrupt) {
+    f.db.pager().begin();
+    corrupt(f.db.pager());
+    std::string verdict = f.db.check();
+    f.db.pager().rollback();
+    return verdict;
+}
+
+static void setU32(Page& pg, size_t off, uint32_t v) { for (int i = 0; i < 4; i++) pg[off + i] = uint8_t(v >> (8 * i)); }
+
+TEST(check_detects_corrupt_free_list) {
+    Fixture f;
+    f.run("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+    f.run("INSERT INTO t (v) VALUES ('a')");
+    f.run("CREATE TABLE u (id INTEGER PRIMARY KEY, v TEXT)");
+    f.run("DROP TABLE u");  // puts one page on the free list
+    CHECK(f.db.check().empty());
+    uint32_t freePg = f.db.pager().freeHead();
+    uint32_t tRoot = f.db.table("t")->root;
+    Page pg;
+
+    // header count disagrees with the list
+    std::string e = checkAfter(f, [&](Pager& p) { p.get(0, pg); setU32(pg, HEADER_FREE_COUNT, 5); p.put(0, pg); });
+    CHECK(e.find("free pages but the list has") != std::string::npos);
+    // a cycle: the free page points at itself
+    e = checkAfter(f, [&](Pager& p) { p.get(freePg, pg); setU32(pg, 1, freePg); p.put(freePg, pg); });
+    CHECK(e.find("loops back") != std::string::npos);
+    // the list leads into a page that is in use
+    e = checkAfter(f, [&](Pager& p) { p.get(0, pg); setU32(pg, HEADER_FREE_HEAD, tRoot); p.put(0, pg); });
+    CHECK(e.find("is on the free list but is in use") != std::string::npos);
+    // the list points at the header / catalog root, which are never free
+    e = checkAfter(f, [&](Pager& p) { p.get(0, pg); setU32(pg, HEADER_FREE_HEAD, 1); p.put(0, pg); });
+    CHECK(!e.empty());
+    // a page nobody owns (allocated and dropped on the floor) is a leak
+    e = checkAfter(f, [&](Pager& p) { p.allocate(); });
+    CHECK(e.find("is leaked") != std::string::npos);
+    // a free page that was forgotten (list emptied but the page left behind) is a leak too
+    e = checkAfter(f, [&](Pager& p) { p.get(0, pg); setU32(pg, HEADER_FREE_HEAD, 0); setU32(pg, HEADER_FREE_COUNT, 0); p.put(0, pg); });
+    CHECK(e.find("is leaked") != std::string::npos);
+    CHECK(f.db.check().empty());  // the real database was never touched
+}
+
 TEST(crash_torture_finds_no_problems_in_the_real_engine) {
     TortureSummary s = tortureMany(1, 1500);
     if (s.failures) std::printf("    seed %llu: %s\n", (unsigned long long)s.firstFailure.seed, s.firstFailure.failure.c_str());
@@ -384,6 +429,7 @@ TEST(crash_torture_catches_every_injected_bug) {
     Bugs b; b.checkpointResetsWalFirst = true; expectCaught(b, "checkpointResetsWalFirst");
     Bugs c; c.skipWalChecksum = true; expectCaught(c, "skipWalChecksum");
     Bugs d; d.replayUncommittedFrames = true; expectCaught(d, "replayUncommittedFrames");
+    Bugs e; e.allocateKeepsFreePage = true; expectCaught(e, "allocateKeepsFreePage");
 }
 
 int main() {

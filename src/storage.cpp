@@ -330,9 +330,11 @@ uint32_t Pager::allocate() {
         uint32_t head = rd32(&header[HEADER_FREE_HEAD]);
         Page freePg;
         if (head && peek(head, freePg) && freePg[0] == FREE_PAGE) {
-            wr32(&header[HEADER_FREE_HEAD], rd32(&freePg[1]));
-            wr32(&header[HEADER_FREE_COUNT], rd32(&header[HEADER_FREE_COUNT]) - 1);
-            dirty_[HEADER_PAGE] = header;
+            if (!bugs_.allocateKeepsFreePage) {  // BUG when set: the page is handed out but never taken off the list
+                wr32(&header[HEADER_FREE_HEAD], rd32(&freePg[1]));
+                wr32(&header[HEADER_FREE_COUNT], rd32(&header[HEADER_FREE_COUNT]) - 1);
+                dirty_[HEADER_PAGE] = header;
+            }
             dirty_[head] = Page{};
             return head;
         }

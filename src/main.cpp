@@ -17,7 +17,8 @@ USAGE:
     granite --torture N --bug NAME
                             prove the crash test catches a deliberate bug:
                             commitWithoutSync, checkpointResetsWalFirst,
-                            skipWalChecksum, replayUncommittedFrames
+                            skipWalChecksum, replayUncommittedFrames,
+                            allocateKeepsFreePage
 
 SHELL COMMANDS:
     .tables  .schema  .tree TABLE  .stats  .checkpoint  .check  .help  .quit
@@ -29,6 +30,7 @@ static bool setBug(Bugs& b, const std::string& name) {
     else if (name == "checkpointResetsWalFirst") b.checkpointResetsWalFirst = true;
     else if (name == "skipWalChecksum") b.skipWalChecksum = true;
     else if (name == "replayUncommittedFrames") b.replayUncommittedFrames = true;
+    else if (name == "allocateKeepsFreePage") b.allocateKeepsFreePage = true;
     else return false;
     return true;
 }
@@ -42,7 +44,7 @@ static int torture(int runs, const std::string& bug) {
     std::printf("  %ld transactions, %ld committed; %ld crashes landed mid-commit\n", s.transactions, s.commits, s.midCommit);
     std::printf("  recovery replayed %ld log frames and discarded %ld unfinished or torn ones\n\n", s.framesReplayed, s.framesDiscarded);
     if (s.failures == 0) {
-        std::printf("Every committed transaction survived, none was half-applied, and every B+ tree passed its checks.\n");
+        std::printf("Every committed transaction survived, none was half-applied, and every B+ tree and the free list passed their checks.\n");
         return bug.empty() ? 0 : 1;
     }
     std::printf("FAILED on seed %llu: %s\n", (unsigned long long)s.firstFailure.seed, s.firstFailure.failure.c_str());

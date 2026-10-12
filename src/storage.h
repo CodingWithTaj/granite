@@ -28,6 +28,7 @@ struct Bugs {
     bool checkpointResetsWalFirst = false;  // empty the log before the database file is safely written
     bool skipWalChecksum = false;           // trust log frames without verifying their checksums
     bool replayUncommittedFrames = false;   // apply log frames that were never committed
+    bool allocateKeepsFreePage = false;     // hand out the head of the free list but leave it on the list
 };
 
 /// Small, fast, seeded random numbers (xorshift64), so every crash scenario replays exactly.
