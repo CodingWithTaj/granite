@@ -2,6 +2,7 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra
 CORE = src/storage.cpp src/btree.cpp src/database.cpp src/torture.cpp
 WASI_SDK ?= /opt/wasi-sdk
+PYTHON ?= python3
 
 ifeq ($(OS),Windows_NT)
   EXE = .exe
@@ -23,7 +24,7 @@ diff-runner$(EXE): $(CORE) tests/diff_runner.cpp src/*.h
 
 # compare thousands of random queries against SQLite (needs python3)
 differential: diff-runner$(EXE)
-	python3 tests/differential.py 1 100
+	$(PYTHON) tests/differential.py 1 200
 
 torture: granite$(EXE)
 	./granite$(EXE) --torture 2000
