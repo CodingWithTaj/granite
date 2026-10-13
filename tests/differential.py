@@ -86,6 +86,30 @@ def gen(seed):
         else:
             queries.append(("w", f"INSERT INTO t1 (a, b, c) VALUES ({val('a')}, {val('b')}, {val('c')})"))
             queries.append(("q", "SELECT * FROM t1 ORDER BY id"))
+    # Create/fill/drop cycles on scratch tables, so freed pages get reused (the runner runs
+    # Granite's check() after every statement, which catches a leaked or doubly-owned page).
+    # A separate random stream keeps the queries above identical to what they were before.
+    C = random.Random(seed + 1_000_000)
+    live = []  # scratch tables that currently exist
+    def fill(name):
+        rows = ", ".join(f"({C.randint(-9, 99)}, '{'x' * C.randint(0, 300)}{C.choice(['a', 'b', 'c'])}')" for _ in range(C.randint(1, 60)))
+        return [("w", f"INSERT INTO {name} (n, txt) VALUES {rows}"),
+                ("q", f"SELECT COUNT(*), SUM(n), MAX(txt) FROM {name}"),
+                ("q", f"SELECT id, n, txt FROM {name} ORDER BY id")]
+    after = 0  # cycles go in order, each after the previous one, so a DROP never precedes its CREATE
+    for i in range(C.randint(2, 5)):
+        name = f"s{i}"
+        cycle = [("w", f"CREATE TABLE {name} (id INTEGER PRIMARY KEY, n INTEGER, txt TEXT)")] + fill(name)
+        live.append(name)
+        if C.random() < 0.8:  # drop one table; the next cycle's CREATE should reuse its pages
+            gone = C.choice(live)
+            live.remove(gone)
+            cycle.append(("w", f"DROP TABLE {gone}"))
+        at = C.randint(after, len(queries))
+        queries[at:at] = cycle
+        after = at + len(cycle)
+    for name in live:  # tables that survive are read again at the very end
+        queries.append(("q", f"SELECT COUNT(*), SUM(n) FROM {name}"))
     return setup, queries
 
 def norm(rows, ordered):
