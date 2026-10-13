@@ -28,26 +28,27 @@ Granite is tested against that promise by crashing it on purpose. It runs on a s
 |---|---|
 | Durability | Every transaction whose `COMMIT` returned is fully present |
 | Atomicity | A transaction interrupted mid-commit is either entirely present or entirely absent |
-| Integrity | Every B+ tree is structurally sound: sorted, balanced, sibling links intact |
+| Integrity | Every B+ tree is structurally sound: sorted, balanced, sibling links intact. Every page has exactly one owner (a tree or the free list), and none is leaked |
 | Still works | The recovered database accepts new writes |
 
 ```
 $ ./granite --torture 10000
 Crashed the database 10000 times (seeds 1-10000).
-  449657 transactions, 398851 committed; 5922 crashes landed mid-commit
-  recovery replayed 106645 log frames and discarded 8741 unfinished or torn ones
+  384635 transactions, 339620 committed; 6683 crashes landed mid-commit
+  recovery replayed 148451 log frames and discarded 15614 unfinished or torn ones
 
-Every committed transaction survived, none was half-applied, and every B+ tree passed its checks.
+Every committed transaction survived, none was half-applied, and every B+ tree and the free list passed their checks.
 ```
 
-A checker that never fails could simply be broken. So four classic durability bugs can be switched on, and the harness catches every one:
+A checker that never fails could simply be broken. So five bugs can be switched on, four classic durability bugs and one free-list bug, and the harness catches every one:
 
 | Injected bug | Caught at | What it broke |
 |---|---|---|
-| Report a commit as done before the log is synced | seed 1 | committed data lost |
-| Empty the log during a checkpoint before the database file is synced | seed 14 | a corrupt page after recovery |
-| Trust log frames without verifying checksums | seed 1046 | a torn page accepted as real data |
-| Replay frames from transactions that never committed | seed 10 | a half-applied transaction |
+| Report a commit as done before the log is synced | seed 1 | a transaction half-applied after a mid-commit crash |
+| Empty the log during a checkpoint before the database file is synced | seed 23 | a page on the free list that is also in use |
+| Trust log frames without verifying checksums | seed 222 | a torn page accepted as real data |
+| Replay frames from transactions that never committed | seed 2 | a page on the free list that is also in use |
+| Hand out a free page without taking it off the free list | seed 1 | the free list loops back on itself |
 
 Every scenario comes from its seed, so a failure replays exactly. The native and WebAssembly builds catch each bug on the same seed.
 
@@ -65,11 +66,13 @@ SQL text → tokenizer → parser → planner/executor → B+ trees → pager + 
 
 **Checkpoints** copy the latest version of each logged page into the database file, sync the file, and only then reset the log. Resetting the log first (one of the injectable bugs) loses data if the power dies in between.
 
+**The free list** (`Pager::allocate` and `Pager::free`). `DROP TABLE` hands every page of the table's B+ tree back to a linked list of unused pages: page 0 holds the head of the list and a count, and each free page stores the number of the next one. Allocating a page pops the head, and only when the list is empty does the file grow. Because these are ordinary page writes, they travel through the same transaction and log as everything else, so a rollback or a crash before `COMMIT` simply un-frees them and no extra recovery code is needed. After every recovery, the integrity check confirms that each page is owned exactly once, by a tree or by the list. The effect, measured: five rounds of `CREATE TABLE`, insert 1,000 rows, `DROP TABLE` grew the database to 317 pages (1,298,432 bytes) before the free list existed; now it stays at 65 pages (266,240 bytes).
+
 **The SQL engine** (`src/database.cpp`). A hand-written tokenizer and recursive-descent parser; `CREATE TABLE`, `DROP TABLE`, `INSERT`, `SELECT` with `WHERE`, inner `JOIN`, `GROUP BY`, `HAVING`, `ORDER BY` (by expression, alias or position), `LIMIT`, `COUNT/SUM/MIN/MAX/AVG`, `SELECT` without a table, `UPDATE`, `DELETE`, `BEGIN/COMMIT/ROLLBACK`, and `EXPLAIN`. The planner turns conditions on the primary key (`id = 5`, `id >= 10 AND id < 20`) into a B+ tree range seek, and joins on a primary key become index lookups instead of nested scans. Column names are checked before execution, so errors are reported even on empty tables.
 
 ## Checked against SQLite
 
-The query engine is tested differentially: random tables and over 15,000 random queries, updates and deletes are run on both Granite and SQLite (the most heavily tested database there is), and every result must match. That covers `NULL` handling in comparisons and `AND`/`OR`/`NOT`, integer division and remainders (including by zero), grouping, `HAVING`, every aggregate, joins, and ordering with `LIMIT`. Current result: zero mismatches. The engine has also been run under AddressSanitizer and UndefinedBehaviorSanitizer through the full test suite and thousands of fuzzed, malformed statements, with no memory errors or undefined behavior.
+The query engine is tested differentially: random tables and over 18,000 random queries, updates, deletes and `CREATE`/`DROP TABLE` cycles are run on both Granite and SQLite (the most heavily tested database there is), and every result must match. That covers `NULL` handling in comparisons and `AND`/`OR`/`NOT`, integer division and remainders (including by zero), grouping, `HAVING`, every aggregate, joins, and ordering with `LIMIT`. The table cycles make later tables reuse the pages of dropped ones, and the integrity check runs after every statement. Current result: zero mismatches. The engine has also been run under AddressSanitizer and UndefinedBehaviorSanitizer through the full test suite and thousands of fuzzed, malformed statements, with no memory errors or undefined behavior.
 
 ## What the tests caught during development
 
@@ -80,7 +83,7 @@ The query engine is tested differentially: random tables and over 15,000 random 
 
 ## Limits
 
-Granite is a teaching-sized engine, and honest about it: one writer at a time, integer primary keys only, rows up to 1000 bytes (no overflow pages), no secondary indexes, and deleted space is reused within a page but pages are never freed. Each of these is a well-defined next step.
+Granite is a teaching-sized engine, and honest about it: one writer at a time, integer primary keys only, rows up to 1000 bytes (no overflow pages), no secondary indexes, and only partial space reclamation (a dropped table's pages are reused through the free list, but a page emptied by `DELETE` is never freed and the database file never shrinks); each is a well-defined next step.
 
 ## Building
 
@@ -88,7 +91,7 @@ You need a C++20 compiler (g++ 10+ or clang 12+) and `make`.
 
 ```bash
 make            # the granite shell
-make test       # 15 tests, including 1,500 crashes and the four injected bugs
+make test       # 22 tests, including 1,500 crashes and the five injected bugs
 make differential   # compare thousands of random queries against SQLite
 ./granite mydata.db                      # a database file (its log is mydata.db-wal)
 ./granite --torture 2000                 # crash it 2,000 times
